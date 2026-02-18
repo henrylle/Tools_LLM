@@ -1,0 +1,60 @@
+# tools.py
+import os
+import subprocess
+
+BASE_DIR = "./sandbox"
+
+def safe_path(path: str) -> str:
+    full_path = os.path.abspath(os.path.join(BASE_DIR, path))
+    base_path = os.path.abspath(BASE_DIR)
+
+    if not full_path.startswith(base_path):
+        raise PermissionError("Acesso fora da sandbox bloqueado")
+
+    return full_path
+
+
+def execute(command: dict):
+    action = command.get("action")
+    path = command.get("path", "")
+
+    if action == "respond":
+        return command.get("content", "")
+
+    if action == "list_files":
+        target = safe_path(path)
+        return os.listdir(target)
+
+    if action == "read_file":
+        target = safe_path(path)
+        with open(target, "r", encoding="utf-8") as f:
+            return f.read()
+
+    if action == "write_file":
+        target = safe_path(path)
+        with open(target, "w", encoding="utf-8") as f:
+            f.write(command.get("content", ""))
+        return "Arquivo criado"
+
+    if action == "edit_file":
+        target = safe_path(path)
+        with open(target, "w", encoding="utf-8") as f:
+            f.write(command.get("content", ""))
+        return "Arquivo editado"
+
+    if action == "delete_file":
+        target = safe_path(path)
+        os.remove(target)
+        return "Arquivo deletado"
+
+    if action == "shell":
+        cmd = command.get("command", "")
+        try:
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, cwd=safe_path("."), timeout=10)
+            return result.stdout if result.returncode == 0 else f"Erro: {result.stderr}"
+        except subprocess.TimeoutExpired:
+            return "Erro: Comando excedeu timeout de 10s"
+        except Exception as e:
+            return f"Erro ao executar: {str(e)}"
+
+    raise ValueError("Ação inválida")

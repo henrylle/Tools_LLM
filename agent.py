@@ -6,11 +6,54 @@ BASE_URL = "http://127.0.0.1:1234/v1"
 MODEL_NAME = "tanto_faz"
 MAX_HISTORY = 20  # Número máximo de mensagens no histórico
 
-SYSTEM_PROMPT = """Respond with JSON only. Format: {"action": "ACTION", "path": "FILE", "content": "TEXT"}
+SYSTEM_PROMPT = """You are a file system assistant. Respond ONLY with valid JSON, no explanations.
+
 Actions: list_files, read_file, write_file, edit_file, delete_file, shell, respond
 
-You can chain multiple actions by returning a JSON array:
-[{"action": "write_file", "path": "test.txt", "content": "hello"}, {"action": "read_file", "path": "test.txt"}]"""
+Format: {"action": "ACTION", "path": "FILE", "content": "TEXT"}
+
+CRITICAL RULES:
+1. NEVER use triple quotes in JSON strings
+2. Use \\n for newlines inside "content"
+3. Escape quotes with \\"
+4. Return ONLY the JSON object, nothing else
+
+Examples:
+
+User: list files
+Assistant: {"action": "list_files", "path": "."}
+
+User: create hello.py with print hello
+Assistant: {"action": "write_file", "path": "hello.py", "content": "print('hello')"}
+
+User: create test.py that asks name and prints it
+Assistant: {"action": "write_file", "path": "test.py", "content": "name = input('Name: ')\\nprint(f'Hello {name}')"}
+
+User: edit hello.py to add a function
+Assistant: {"action": "edit_file", "path": "hello.py", "content": "def greet():\\n    print('hello')\\n\\ngreet()"}
+
+User: read config.json
+Assistant: {"action": "read_file", "path": "config.json"}
+
+User: delete old.txt
+Assistant: {"action": "delete_file", "path": "old.txt"}
+
+User: run ls command
+Assistant: {"action": "shell", "command": "ls -la"}
+
+User: thanks
+Assistant: {"action": "respond", "content": "Done!"}
+
+User: what time is it
+Assistant: {"action": "respond", "content": "I can only manage files, not tell time"}
+
+User: create app.py with input and length check
+Assistant: {"action": "write_file", "path": "app.py", "content": "name = input('Your name: ')\\nprint(f'Length: {len(name)}')"}
+
+User: edit app.py to add greeting
+Assistant: {"action": "edit_file", "path": "app.py", "content": "name = input('Your name: ')\\nprint(f'Hello {name}!')\\nprint(f'Length: {len(name)}')"}
+
+REMEMBER: Use \\n for newlines, NEVER use triple quotes!"""
 
 class Agent:
     def __init__(self):
@@ -47,12 +90,20 @@ class Agent:
 
         content = response.choices[0].message.content.strip()
         
-        # Remove blocos markdown ```json
-        if content.startswith("```"):
-            lines = content.split("\n")
-            content = "\n".join(lines[1:-1]) if len(lines) > 2 else content
-            if content.startswith("json"):
-                content = content[4:].strip()
+        # Remove markdown code blocks
+        if "```" in content:
+            # Extrai conteúdo entre ``` ou ```json e ```
+            import re
+            match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', content, re.DOTALL)
+            if match:
+                content = match.group(1)
+            else:
+                # Se não achou padrão completo, tenta pegar primeira linha com {
+                lines = [l.strip() for l in content.split("\n") if l.strip()]
+                for line in lines:
+                    if line.startswith("{"):
+                        content = line
+                        break
         
         # Adiciona resposta do assistente ao histórico
         self.history.append({"role": "assistant", "content": content})
@@ -63,43 +114,52 @@ class Agent:
             if len(parts) > 1:
                 content = parts[1].strip()
             else:
-                # Se não fechou o </think>, pega tudo depois de <think>
                 content = content.split("<think>")[0].strip()
                 if not content:
                     raise ValueError("Modelo retornou apenas raciocínio, sem JSON")
 
-        # Remove markdown code blocks se existirem
-        if content.startswith("```"):
-            content = content.split("```")[1]
-            if content.startswith("json"):
-                content = content[4:]
-            content = content.strip()
-
         # 🔒 Parser defensivo
         try:
             return json.loads(content)
-        except json.JSONDecodeError as e:
+        except json.JSONDecodeError:
             import re
             
-            # Tenta extrair action e path do JSON quebrado
-            action_match = re.search(r'"action":\s*"(\w+)"', content)
-            path_match = re.search(r'"path":\s*"([^"]+)"', content)
+            # Fix: Remove triple quotes dentro de strings JSON
+            if '"""' in content:
+                # Substitui """ por aspas simples escapadas
+                content = content.replace('"""', '')
             
-            if action_match:
-                action = action_match.group(1)
-                result = {"action": action}
-                
-                if path_match:
-                    result["path"] = path_match.group(1)
-                
-                # Se for write_file e não tem content válido, extrai o texto após path
-                if action == "write_file" and "content" not in content:
-                    # Pega tudo após "path": "xxx", até o final
-                    remaining = content[path_match.end():]
-                    # Remove lixo inicial e pega o texto útil
-                    text = re.sub(r'^[^a-zA-Z]+', '', remaining).strip()
-                    result["content"] = text
-                
-                return result
+            # Tenta novamente após limpeza
+            try:
+                return json.loads(content)
+            except:
+                pass
             
-            raise ValueError(f"Resposta não é JSON válido:\n{content}\nErro: {e}")
+            # Procura por padrão {"action": ...}
+            match = re.search(r'\{[^}]*"action"[^}]*\}', content)
+            if match:
+                try:
+                    return json.loads(match.group(0))
+                except:
+                    pass
+            
+            # 🧠 Parser inteligente: detecta intenção de criar arquivo
+            # Padrão: # Arquivo: nome.ext seguido de código
+            file_match = re.search(r'#\s*Arquivo:\s*(\S+)\s*\n+(.*)', content, re.DOTALL)
+            if file_match:
+                filename = file_match.group(1)
+                code = file_match.group(2)
+                
+                # Remove blocos markdown do código
+                code = re.sub(r'```\w*\n?', '', code).strip()
+                # Remove texto explicativo após o código
+                code = re.split(r'\n\nTo run this', code)[0].strip()
+                
+                return {
+                    "action": "write_file",
+                    "path": filename,
+                    "content": code
+                }
+            
+            # Se falhou, retorna resposta como texto
+            return {"action": "respond", "content": f"Erro: modelo retornou texto ao invés de JSON:\n{content}"}

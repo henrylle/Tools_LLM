@@ -27,8 +27,7 @@ def typewriter(text, delay=0.01):
         sys.stdout.flush()
         time.sleep(delay)
     print()  # Nova linha no final
-    
-time.sleep(0.5)
+
 print("\033[94m" + """
                 *@@@@@@*      *@@@@@@*      *@@@@@@mm   mm@@@@@@*
                    @@             @@             @@@@@@     @@@@@@
@@ -42,7 +41,6 @@ print("\033[94m" + """
 
 
 """ + "\033[0m")
-time.sleep(0.5)
 print("Hello! How can I help you today?")
 print("")
 while True:

@@ -27,6 +27,8 @@ def execute(command: dict):
 
     if action == "read_file":
         target = safe_path(path)
+        if not os.path.exists(target):
+            return f"❌ Arquivo '{path}' não existe"
         with open(target, "r", encoding="utf-8") as f:
             return f.read()
 

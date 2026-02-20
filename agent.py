@@ -2,26 +2,87 @@
 from openai import OpenAI
 import json
 
-BASE_URL = "http://127.0.0.1:1234/v1"
+BASE_URL = "http://192.168.0.103:1234/v1"
 MODEL_NAME = "tanto_faz"
 MAX_HISTORY = 20  # Número máximo de mensagens no histórico
 
-SYSTEM_PROMPT = """You are a file system assistant. Respond ONLY with valid JSON, no explanations.
+SYSTEM_PROMPT = """You are an autonomous file management system.
 
-Actions: list_files, read_file, write_file, edit_file, delete_file, shell, respond
+YOU CANT, NEVER, WITH NO NEGOCIATING, DONT SPECIFY THE ACTIONS.
+EVERY RESPONDE MUST BE LIKE THIS:
+{"action": "ACTION", "path": "FILE", "content": "TEXT"}
+OR, IF YOU DONT NEED TO MAKE ANY FILES:
+{"action": "ACTION", "content": "TEXT"}
+
+Available actions:
+- list_files, read_file, write_file, edit_file, delete_file, shell, respond
 
 Format: {"action": "ACTION", "path": "FILE", "content": "TEXT"}
 
-CRITICAL RULES:
-1. NEVER use triple quotes in JSON strings
-2. Use \\n for newlines inside "content"
-3. Escape quotes with \\"
-4. Return ONLY the JSON object, nothing else
+Respond in Portuguese (Brazil).
+
+⚠️ EXECUTION RULES:
+1. Return ONLY ONE JSON object per response
+2. NEVER write [RESULT] - the system will provide it
+3. After you return JSON, system executes and shows result
+4. Then you decide the next action based on the result
+
+🧠 REASONING FRAMEWORK:
+Before each action, ask yourself:
+1. "What information do I have?"
+2. "What information do I need?"
+3. "What action gets me that information?"
+4. "Is the ENTIRE task complete, or do I need to continue?"
+
+IMPORTANT: Use "respond" ONLY when the ENTIRE task is finished, not after each step!
+
+Example of good reasoning:
+User: "delete files that say they are not important"
+
+Step 1: What do I have? → Nothing yet
+        What do I need? → List of files
+        Action: {"action": "shell", "command": "ls"}
+
+Step 2: What do I have? → file1.txt, file2.txt, file3.txt
+        What do I need? → Content of file1.txt
+        Task complete? → NO, need to check all files
+        Action: {"action": "read_file", "path": "file1.txt"}
+
+Step 3: What do I have? → file1.txt says "NOT IMPORTANT"
+        Analysis: Should delete this file
+        Task complete? → NO, still have file2.txt and file3.txt to check
+        Action: {"action": "delete_file", "path": "file1.txt"}
+
+Step 4: What do I have? → file1.txt deleted
+        What do I need? → Content of file2.txt
+        Task complete? → NO, still have file2.txt and file3.txt
+        Action: {"action": "read_file", "path": "file2.txt"}
+
+Step 5: What do I have? → file2.txt says "IMPORTANT"
+        Analysis: Should NOT delete, keep it
+        Task complete? → NO, still have file3.txt to check
+        Action: {"action": "read_file", "path": "file3.txt"}
+
+Step 6: What do I have? → file3.txt says "NOT IMPORTANT"
+        Analysis: Should delete this file
+        Task complete? → NO, need to delete it first
+        Action: {"action": "delete_file", "path": "file3.txt"}
+
+Step 7: What do I have? → All files checked and processed
+        Task complete? → YES! All files were analyzed
+        Action: {"action": "respond", "content": "Deletei file1.txt e file3.txt. Mantive file2.txt pois é importante."}
+
+Key principle: GATHER ALL DATA → PROCESS ALL ITEMS → RESPOND ONCE AT THE END
+
+Remember: "respond" = task is COMPLETELY finished!
 
 Examples:
 
 User: list files
 Assistant: {"action": "list_files", "path": "."}
+
+User: read the files
+Assistant: {"action": "read_file", "path": "hi.txt"}
 
 User: create hello.py with print hello
 Assistant: {"action": "write_file", "path": "hello.py", "content": "print('hello')"}
@@ -63,16 +124,22 @@ class Agent:
         )
         self.history = []
 
-    def think(self, user_input: str) -> dict:
-        # Adiciona mensagem do usuário ao histórico
-        self.history.append({"role": "user", "content": user_input})
+    def think(self, user_input: str, action_result: str = None) -> dict:
+        # Se há resultado de ação anterior, adiciona ao histórico
+        if action_result:
+            self.history.append({"role": "user", "content": action_result})
+        else:
+            # Adiciona mensagem do usuário ao histórico
+            self.history.append({"role": "user", "content": user_input})
         
         # Mantém apenas as últimas MAX_HISTORY mensagens
         if len(self.history) > MAX_HISTORY:
             self.history = self.history[-MAX_HISTORY:]
         
+        # Reforça o papel do sistema a cada chamada
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": "You are executing actions in a real system. Continue with the next action or respond when done."},
             {"role": "user", "content": "list files"},
             {"role": "assistant", "content": '{"action": "list_files", "path": "."}'},
             {"role": "user", "content": "create test.txt with hello"},
@@ -85,81 +152,94 @@ class Agent:
             model=MODEL_NAME,
             messages=messages,
             temperature=0,
-            max_tokens=2000
+            max_tokens=7000
         )
 
         content = response.choices[0].message.content.strip()
         
-        # Remove markdown code blocks
+        # Remove markdown code blocks e extrai TODOS os JSONs
+        import re
+        json_blocks = []
         if "```" in content:
-            # Extrai conteúdo entre ``` ou ```json e ```
-            import re
-            match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', content, re.DOTALL)
-            if match:
-                content = match.group(1)
-            else:
-                # Se não achou padrão completo, tenta pegar primeira linha com {
-                lines = [l.strip() for l in content.split("\n") if l.strip()]
-                for line in lines:
-                    if line.startswith("{"):
-                        content = line
-                        break
+            # Extrai TODOS os blocos JSON dentro de markdown
+            matches = re.findall(r'```(?:json)?\s*(\{.*?\})\s*```', content, re.DOTALL)
+            if matches:
+                json_blocks = matches
         
-        # Adiciona resposta do assistente ao histórico
-        self.history.append({"role": "assistant", "content": content})
+        # Se não encontrou em markdown, procura JSONs soltos
+        if not json_blocks:
+            # Procura todos os objetos JSON válidos (incluindo multiline)
+            matches = re.findall(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', content, re.DOTALL)
+            for match in matches:
+                # Valida se parece com JSON válido (tem "action")
+                if '"action"' in match:
+                    json_blocks.append(match.strip())
+        
+        # Se ainda não encontrou, usa o conteúdo original
+        if not json_blocks:
+            json_blocks = [content]
+        
+        # Processa cada bloco JSON
+        commands = []
+        for block in json_blocks:
+            # Adiciona resposta do assistente ao histórico (apenas o primeiro)
+            if not commands:
+                self.history.append({"role": "assistant", "content": block})
 
-        # Remove tags <think> do DeepSeek R1
-        if "<think>" in content:
-            parts = content.split("</think>")
-            if len(parts) > 1:
-                content = parts[1].strip()
-            else:
-                content = content.split("<think>")[0].strip()
-                if not content:
-                    raise ValueError("Modelo retornou apenas raciocínio, sem JSON")
+            # Remove tags <think> do DeepSeek R1
+            if "<think>" in block:
+                parts = block.split("</think>")
+                if len(parts) > 1:
+                    block = parts[1].strip()
+                else:
+                    block = block.split("<think>")[0].strip()
+                    if not block:
+                        continue
 
-        # 🔒 Parser defensivo
-        try:
-            return json.loads(content)
-        except json.JSONDecodeError:
-            import re
-            
-            # Fix: Remove triple quotes dentro de strings JSON
-            if '"""' in content:
-                # Substitui """ por aspas simples escapadas
-                content = content.replace('"""', '')
-            
-            # Tenta novamente após limpeza
+            # 🔒 Parser defensivo
             try:
-                return json.loads(content)
-            except:
-                pass
-            
-            # Procura por padrão {"action": ...}
-            match = re.search(r'\{[^}]*"action"[^}]*\}', content)
-            if match:
+                commands.append(json.loads(block))
+            except json.JSONDecodeError:
+                # Fix: Remove triple quotes e corrige escapes
+                if '"""' in block:
+                    block = block.replace('"""', '')
+                
+                # Fix: Corrige barras invertidas mal escapadas (\ seguido de espaço/newline)
+                block = re.sub(r'\\\s+', '', block)
+                
+                # Tenta novamente após limpeza
                 try:
-                    return json.loads(match.group(0))
+                    commands.append(json.loads(block))
+                    continue
                 except:
                     pass
-            
-            # 🧠 Parser inteligente: detecta intenção de criar arquivo
-            # Padrão: # Arquivo: nome.ext seguido de código
-            file_match = re.search(r'#\s*Arquivo:\s*(\S+)\s*\n+(.*)', content, re.DOTALL)
-            if file_match:
-                filename = file_match.group(1)
-                code = file_match.group(2)
                 
-                # Remove blocos markdown do código
-                code = re.sub(r'```\w*\n?', '', code).strip()
-                # Remove texto explicativo após o código
-                code = re.split(r'\n\nTo run this', code)[0].strip()
+                # Procura por padrão {"action": ...}
+                match = re.search(r'\{[^}]*"action"[^}]*\}', block)
+                if match:
+                    try:
+                        commands.append(json.loads(match.group(0)))
+                        continue
+                    except:
+                        pass
                 
-                return {
-                    "action": "write_file",
-                    "path": filename,
-                    "content": code
-                }
-            
-            # Se falhou, retorna resposta como texto
+                # 🧠 Parser inteligente: detecta intenção de criar arquivo
+                file_match = re.search(r'#\s*Arquivo:\s*(\S+)\s*\n+(.*)', block, re.DOTALL)
+                if file_match:
+                    filename = file_match.group(1)
+                    code = file_match.group(2)
+                    code = re.sub(r'```\w*\n?', '', code).strip()
+                    code = re.split(r'\n\nTo run this', code)[0].strip()
+                    commands.append({
+                        "action": "write_file",
+                        "path": filename,
+                        "content": code
+                    })
+                    continue
+        
+        # Se não conseguiu parsear nenhum comando, retorna erro
+        if not commands:
             return {"action": "respond", "content": f"Erro: modelo retornou texto ao invés de JSON:\n{content}"}
+        
+        # Retorna apenas o PRIMEIRO comando (executa passo a passo)
+        return commands[0]
